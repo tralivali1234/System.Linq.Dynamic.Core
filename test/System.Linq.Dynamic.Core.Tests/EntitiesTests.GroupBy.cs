@@ -36,9 +36,9 @@ namespace System.Linq.Dynamic.Core.Tests
             }
         }
 
-#if EFCORE
+//#if EFCORE
         // Error since Microsoft.EntityFrameworkCore 1.0.1 ???
-#else
+//#else
         [Fact]
         public void Entities_GroupBy_MultiKey()
         {
@@ -49,8 +49,7 @@ namespace System.Linq.Dynamic.Core.Tests
 
             //Act
             var test = _context.Posts.GroupBy("new (BlogId, PostDate)").OrderBy("Key.PostDate").ToDynamicArray();
-
-
+            
             //Assert
             Assert.Equal(expected.Length, test.Length);
             for (int i = 0; i < expected.Length; i++)
@@ -65,7 +64,7 @@ namespace System.Linq.Dynamic.Core.Tests
                 Assert.Equal(expectedRow.ToArray(), testRow.ToArray());
             }
         }
-#endif
+//#endif
         [Fact]
         public void Entities_GroupBy_SingleKey_SingleResult()
         {
