@@ -62,18 +62,45 @@ namespace System.Linq.Dynamic.Core.Tests
         }
 
         [Fact]
+        public void Select_Dynamic_Add_Integers()
+        {
+            // Arrange
+            var range = new List<int> { 1, 2 };
+
+            // Act
+            IEnumerable rangeResult = range.AsQueryable().Select("it + 1");
+
+            // Assert
+            Assert.Equal(range.Select(x => x + 1).ToArray(), rangeResult.Cast<int>().ToArray());
+        }
+
+        [Fact]
+        public void Select_Dynamic_Add_Strings()
+        {
+            // Arrange
+            var range = new List<string> { "a", "b" };
+
+            // Act
+            IEnumerable rangeResult = range.AsQueryable().Select("it + \"c\"");
+
+            // Assert
+            Assert.Equal(range.Select(x => x + "c").ToArray(), rangeResult.Cast<string>().ToArray());
+        }
+
+        [Fact]
         public void Select_Dynamic_WithIncludes()
         {
-            //Arrange
-            var testList = new List<Entities.Employee>();
-            var qry = testList.AsQueryable();
+            // Arrange
+            var qry = new List<Entities.Employee>().AsQueryable();
 
-            //Act
+            // Act
             string includesX =
                 ", it.Company as TEntity__Company, it.Company.MainCompany as TEntity__Company_MainCompany, it.Country as TEntity__Country, it.Function as TEntity__Function, it.SubFunction as TEntity__SubFunction";
             string select = $"new (\"__Key__\" as __Key__, it AS TEntity__{includesX})";
 
             var userNames = qry.Select(select).ToDynamicList();
+
+            // Assert
             Assert.NotNull(userNames);
         }
 
@@ -88,7 +115,7 @@ namespace System.Linq.Dynamic.Core.Tests
 
             var dynamicSelect = qry.Select("new (FirstName, LastName, FullName)").ToDynamicList();
             Assert.NotNull(dynamicSelect);
-            Assert.Equal(1, dynamicSelect.Count);
+            Assert.Single(dynamicSelect);
 
             var firstEmployee = dynamicSelect.FirstOrDefault();
             Assert.NotNull(firstEmployee);

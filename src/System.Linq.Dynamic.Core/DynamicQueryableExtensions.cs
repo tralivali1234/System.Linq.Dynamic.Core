@@ -1,5 +1,7 @@
 ﻿using System.Collections.Generic;
 using System.Collections;
+using System.Globalization;
+using System.Linq.Dynamic.Core.Exceptions;
 #if !(WINDOWS_APP45x || SILVERLIGHT)
 using System.Diagnostics;
 #endif
@@ -8,6 +10,7 @@ using System.Linq.Dynamic.Core.Validation;
 using System.Linq.Expressions;
 using System.Reflection;
 using JetBrains.Annotations;
+using System.Linq.Dynamic.Core.Parser;
 #if WINDOWS_APP
 using System;
 using System.Linq;
@@ -23,9 +26,9 @@ namespace System.Linq.Dynamic.Core
     public static class DynamicQueryableExtensions
     {
 #if !(WINDOWS_APP45x || SILVERLIGHT)
-        private static readonly TraceSource _ts = new TraceSource(typeof(DynamicQueryableExtensions).Name);
+        private static readonly TraceSource TraceSource = new TraceSource(typeof(DynamicQueryableExtensions).Name);
 #endif
-        private static readonly Func<MethodInfo, bool> _predicateParameterHas2 = (mi) => mi.GetParameters()[1].ToString().Contains("Func`2");
+        private static readonly Func<MethodInfo, bool> PredicateParameterHas2 = mi => mi.GetParameters()[1].ToString().Contains("Func`2");
 
         private static Expression OptimizeExpression(Expression expression)
         {
@@ -36,8 +39,8 @@ namespace System.Linq.Dynamic.Core
 #if !(WINDOWS_APP45x || SILVERLIGHT)
                 if (optimized != expression)
                 {
-                    _ts.TraceEvent(TraceEventType.Verbose, 0, "Expression before : {0}", expression);
-                    _ts.TraceEvent(TraceEventType.Verbose, 0, "Expression after  : {0}", optimized);
+                    TraceSource.TraceEvent(TraceEventType.Verbose, 0, "Expression before : {0}", expression);
+                    TraceSource.TraceEvent(TraceEventType.Verbose, 0, "Expression after  : {0}", optimized);
                 }
 #endif
                 return optimized;
@@ -46,7 +49,59 @@ namespace System.Linq.Dynamic.Core
             return expression;
         }
 
-#region Any
+        #region Aggregate
+        /// <summary>
+        /// Dynamically runs an aggregate function on the IQueryable.
+        /// </summary>
+        /// <param name="source">The IQueryable data source.</param>
+        /// <param name="function">The name of the function to run. Can be Sum, Average, Min or Max.</param>
+        /// <param name="member">The name of the property to aggregate over.</param>
+        /// <returns>The value of the aggregate function run over the specified property.</returns>
+        public static object Aggregate([NotNull] this IQueryable source, [NotNull] string function, [NotNull] string member)
+        {
+            Check.NotNull(source, nameof(source));
+            Check.NotEmpty(function, nameof(function));
+            Check.NotEmpty(member, nameof(member));
+
+            // Properties
+            PropertyInfo property = source.ElementType.GetProperty(member);
+            ParameterExpression parameter = Expression.Parameter(source.ElementType, "s");
+            Expression selector = Expression.Lambda(Expression.MakeMemberAccess(parameter, property), parameter);
+            // We've tried to find an expression of the type Expression<Func<TSource, TAcc>>,
+            // which is expressed as ( (TSource s) => s.Price );
+
+            var methods = typeof(Queryable).GetMethods().Where(x => x.Name == function && x.IsGenericMethod);
+
+            // Method
+            MethodInfo aggregateMethod = methods.SingleOrDefault(m =>
+            {
+                ParameterInfo lastParameter = m.GetParameters().LastOrDefault();
+
+                return lastParameter != null ? TypeHelper.GetUnderlyingType(lastParameter.ParameterType) == property.PropertyType : false;
+            });
+
+            // Sum, Average
+            if (aggregateMethod != null)
+            {
+                return source.Provider.Execute(
+                    Expression.Call(
+                        null,
+                        aggregateMethod.MakeGenericMethod(source.ElementType),
+                        new[] { source.Expression, Expression.Quote(selector) }));
+            }
+
+            // Min, Max
+            aggregateMethod = methods.SingleOrDefault(m => m.Name == function && m.GetGenericArguments().Length == 2);
+
+            return source.Provider.Execute(
+                Expression.Call(
+                    null,
+                    aggregateMethod.MakeGenericMethod(source.ElementType, property.PropertyType),
+                    new[] { source.Expression, Expression.Quote(selector) }));
+        }
+        #endregion Aggregate
+
+        #region Any
         private static readonly MethodInfo _any = GetMethod(nameof(Queryable.Any));
 
         /// <summary>
@@ -73,6 +128,7 @@ namespace System.Linq.Dynamic.Core
         /// Determines whether a sequence contains any elements.
         /// </summary>
         /// <param name="source">A sequence to check for being empty.</param>
+        /// <param name="config">The <see cref="ParsingConfig"/>.</param>
         /// <param name="predicate">A function to test each element for a condition.</param>
         /// <param name="args">An object array that contains zero or more objects to insert into the predicate as parameters. Similar to the way String.Format formats strings.</param>
         /// <example>
@@ -84,19 +140,39 @@ namespace System.Linq.Dynamic.Core
         /// </code>
         /// </example>
         /// <returns>true if the source sequence contains any elements; otherwise, false.</returns>
-        public static bool Any([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+        public static bool Any([NotNull] this IQueryable source, [CanBeNull] ParsingConfig config, [NotNull] string predicate, params object[] args)
         {
             Check.NotNull(source, nameof(source));
             Check.NotEmpty(predicate, nameof(predicate));
 
             bool createParameterCtor = source.IsLinqToObjects();
-            LambdaExpression lambda = DynamicExpressionParser.ParseLambda(createParameterCtor, source.ElementType, null, predicate, args);
+            LambdaExpression lambda = DynamicExpressionParser.ParseLambda(config, createParameterCtor, source.ElementType, null, predicate, args);
 
             return Execute<bool>(_anyPredicate, source, lambda);
         }
-#endregion Any
 
-#region AsEnumerable
+        /// <inheritdoc cref="Any(IQueryable, ParsingConfig, string, object[])"/>
+        public static bool Any([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+        {
+            return Any(source, null, predicate, args);
+        }
+
+        /// <summary>
+        /// Determines whether a sequence contains any elements.
+        /// </summary>
+        /// <param name="source">A sequence to check for being empty.</param>
+        /// <param name="lambda">A cached Lambda Expression.</param>
+        /// <returns>true if the source sequence contains any elements; otherwise, false.</returns>
+        public static bool Any([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+        {
+            Check.NotNull(source, nameof(source));
+            Check.NotNull(lambda, nameof(lambda));
+
+            return Execute<bool>(_anyPredicate, source, lambda);
+        }
+        #endregion Any
+
+        #region AsEnumerable
 #if NET35
         /// <summary>
         /// Returns the input typed as <see cref="IEnumerable{T}"/> of <see cref="object"/>./>
@@ -118,9 +194,9 @@ namespace System.Linq.Dynamic.Core
                 yield return obj;
             }
         }
-#endregion AsEnumerable
+        #endregion AsEnumerable
 
-#region Count
+        #region Count
         private static readonly MethodInfo _count = GetMethod(nameof(Queryable.Count));
 
         /// <summary>
@@ -147,6 +223,7 @@ namespace System.Linq.Dynamic.Core
         /// Returns the number of elements in a sequence.
         /// </summary>
         /// <param name="source">The <see cref="IQueryable"/> that contains the elements to be counted.</param>
+        /// <param name="config">The <see cref="ParsingConfig"/>.</param>
         /// <param name="predicate">A function to test each element for a condition.</param>
         /// <param name="args">An object array that contains zero or more objects to insert into the predicate as parameters. Similar to the way String.Format formats strings.</param>
         /// <example>
@@ -158,19 +235,79 @@ namespace System.Linq.Dynamic.Core
         /// </code>
         /// </example>
         /// <returns>The number of elements in the specified sequence that satisfies a condition.</returns>
-        public static int Count([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+        public static int Count([NotNull] this IQueryable source, [CanBeNull] ParsingConfig config, [NotNull] string predicate, params object[] args)
         {
             Check.NotNull(source, nameof(source));
             Check.NotEmpty(predicate, nameof(predicate));
 
             bool createParameterCtor = source.IsLinqToObjects();
-            LambdaExpression lambda = DynamicExpressionParser.ParseLambda(createParameterCtor, source.ElementType, null, predicate, args);
+            LambdaExpression lambda = DynamicExpressionParser.ParseLambda(config, createParameterCtor, source.ElementType, null, predicate, args);
 
             return Execute<int>(_countPredicate, source, lambda);
         }
-#endregion Count
 
-#region Distinct
+        /// <inheritdoc cref="Count(IQueryable, ParsingConfig, string, object[])"/>
+        public static int Count([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+        {
+            return Count(source, null, predicate, args);
+        }
+
+        /// <summary>
+        /// Returns the number of elements in a sequence.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> that contains the elements to be counted.</param>
+        /// <param name="lambda">A cached Lambda Expression.</param>
+        /// <returns>The number of elements in the specified sequence that satisfies a condition.</returns>
+        public static int Count([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+        {
+            Check.NotNull(source, nameof(source));
+            Check.NotNull(lambda, nameof(lambda));
+
+            return Execute<int>(_countPredicate, source, lambda);
+        }
+        #endregion Count
+
+        #region DefaultIfEmpty
+        private static readonly MethodInfo _defaultIfEmpty = GetMethod(nameof(Queryable.DefaultIfEmpty));
+        private static readonly MethodInfo _defaultIfEmptyWithParam = GetMethod(nameof(Queryable.DefaultIfEmpty), 1);
+
+        /// <summary>
+        /// Returns the elements of the specified sequence or the type parameter's default value in a singleton collection if the sequence is empty.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return a default value for if empty.</param>
+        /// <example>
+        /// <code language="cs">
+        /// IQueryable queryable = employees.DefaultIfEmpty();
+        /// </code>
+        /// </example>
+        /// <returns>An <see cref="IQueryable"/> that contains default if source is empty; otherwise, source.</returns>
+        public static IQueryable DefaultIfEmpty([NotNull] this IQueryable source)
+        {
+            Check.NotNull(source, nameof(source));
+
+            return CreateQuery(_defaultIfEmpty, source);
+        }
+
+        /// <summary>
+        /// Returns the elements of the specified sequence or the type parameter's default value in a singleton collection if the sequence is empty.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return a default value for if empty.</param>
+        /// <param name="defaultValue">The value to return if the sequence is empty.</param>
+        /// <example>
+        /// <code language="cs">
+        /// IQueryable queryable = employees.DefaultIfEmpty(new Employee());
+        /// </code>
+        /// </example>
+        /// <returns>An <see cref="IQueryable"/> that contains defaultValue if source is empty; otherwise, source.</returns>
+        public static IQueryable DefaultIfEmpty([NotNull] this IQueryable source, [CanBeNull] object defaultValue)
+        {
+            Check.NotNull(source, nameof(source));
+
+            return CreateQuery(_defaultIfEmptyWithParam, source, Expression.Constant(defaultValue));
+        }
+        #endregion
+
+        #region Distinct
         private static readonly MethodInfo _distinct = GetMethod(nameof(Queryable.Distinct));
 
         /// <summary>
@@ -189,12 +326,11 @@ namespace System.Linq.Dynamic.Core
         {
             Check.NotNull(source, nameof(source));
 
-            var optimized = OptimizeExpression(Expression.Call(typeof(Queryable), "Distinct", new Type[] { source.ElementType }, source.Expression));
-            return source.Provider.CreateQuery(optimized);
+            return CreateQuery(_distinct, source);
         }
-#endregion Distinct
+        #endregion Distinct
 
-#region First
+        #region First
         private static readonly MethodInfo _first = GetMethod(nameof(Queryable.First));
 
         /// <summary>
@@ -236,9 +372,27 @@ namespace System.Linq.Dynamic.Core
 
             return Execute(_firstPredicate, source, lambda);
         }
-#endregion First
 
-#region FirstOrDefault
+        /// <summary>
+        /// Returns the first element of a sequence that satisfies a specified condition.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return the first element of.</param>
+        /// <param name="lambda">A cached Lambda Expression.</param>
+        /// <returns>The first element in source that passes the test in predicate.</returns>
+#if NET35
+        public static object First([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#else
+        public static dynamic First([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#endif
+        {
+            Check.NotNull(source, nameof(source));
+            return Execute(_firstPredicate, source, lambda);
+        }
+        #endregion First
+
+        #region FirstOrDefault
+        private static readonly MethodInfo _firstOrDefault = GetMethod(nameof(Queryable.FirstOrDefault));
+
         /// <summary>
         /// Returns the first element of a sequence, or a default value if the sequence contains no elements.
         /// </summary>
@@ -254,7 +408,6 @@ namespace System.Linq.Dynamic.Core
 
             return Execute(_firstOrDefault, source);
         }
-        private static readonly MethodInfo _firstOrDefault = GetMethod(nameof(Queryable.FirstOrDefault));
 
         /// <summary>
         /// Returns the first element of a sequence that satisfies a specified condition or a default value if no such element is found.
@@ -277,10 +430,27 @@ namespace System.Linq.Dynamic.Core
 
             return Execute(_firstOrDefaultPredicate, source, lambda);
         }
-        private static readonly MethodInfo _firstOrDefaultPredicate = GetMethod(nameof(Queryable.FirstOrDefault), 1);
-#endregion FirstOrDefault
 
-#region GroupBy
+        /// <summary>
+        /// Returns the first element of a sequence that satisfies a specified condition or a default value if no such element is found.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return the first element of.</param>
+        /// <param name="lambda">A cached Lambda Expression.</param>
+        /// <returns>default if source is empty or if no element passes the test specified by predicate; otherwise, the first element in source that passes the test specified by predicate.</returns>
+#if NET35
+        public static object FirstOrDefault([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#else
+        public static dynamic FirstOrDefault([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#endif
+        {
+            Check.NotNull(source, nameof(source));
+
+            return Execute(_firstOrDefaultPredicate, source, lambda);
+        }
+        private static readonly MethodInfo _firstOrDefaultPredicate = GetMethod(nameof(Queryable.FirstOrDefault), 1);
+        #endregion FirstOrDefault
+
+        #region GroupBy
         /// <summary>
         /// Groups the elements of a sequence according to a specified key string function 
         /// and creates a result value from each group and its key.
@@ -307,7 +477,7 @@ namespace System.Linq.Dynamic.Core
             LambdaExpression elementLambda = DynamicExpressionParser.ParseLambda(createParameterCtor, source.ElementType, null, resultSelector, args);
 
             var optimized = OptimizeExpression(Expression.Call(
-                typeof(Queryable), "GroupBy",
+                typeof(Queryable), nameof(Queryable.GroupBy),
                 new[] { source.ElementType, keyLambda.Body.Type, elementLambda.Body.Type },
                 source.Expression, Expression.Quote(keyLambda), Expression.Quote(elementLambda)));
 
@@ -361,14 +531,13 @@ namespace System.Linq.Dynamic.Core
 
             var optimized = OptimizeExpression(Expression.Call(
                 typeof(Queryable), nameof(Queryable.GroupBy),
-                new[] { source.ElementType, keyLambda.Body.Type },
-                new[] { source.Expression, Expression.Quote(keyLambda) }));
+                new[] { source.ElementType, keyLambda.Body.Type }, source.Expression, Expression.Quote(keyLambda)));
 
             return source.Provider.CreateQuery(optimized);
         }
-#endregion GroupBy
+        #endregion GroupBy
 
-#region GroupByMany
+        #region GroupByMany
         /// <summary>
         /// Groups the elements of a sequence according to multiple specified key string functions 
         /// and creates a result value from each group (and subgroups) and its key.
@@ -427,9 +596,56 @@ namespace System.Linq.Dynamic.Core
 
             return result;
         }
-#endregion GroupByMany
+        #endregion GroupByMany
 
-#region Join
+        #region GroupJoin
+        /// <summary>
+        /// Correlates the elements of two sequences based on equality of keys and groups the results. The default equality comparer is used to compare keys.
+        /// </summary>
+        /// <param name="outer">The first sequence to join.</param>
+        /// <param name="inner">The sequence to join to the first sequence.</param>
+        /// <param name="outerKeySelector">A dynamic function to extract the join key from each element of the first sequence.</param>
+        /// <param name="innerKeySelector">A dynamic function to extract the join key from each element of the second sequence.</param>
+        /// <param name="resultSelector">A dynamic function to create a result element from an element from the first sequence and a collection of matching elements from the second sequence.</param>
+        /// <param name="args">An object array that contains zero or more objects to insert into the predicates as parameters. Similar to the way String.Format formats strings.</param>
+        /// <returns>An <see cref="IQueryable"/> obtained by performing a grouped join on two sequences.</returns>
+        public static IQueryable GroupJoin([NotNull] this IQueryable outer, [NotNull] IEnumerable inner, [NotNull] string outerKeySelector, [NotNull] string innerKeySelector, [NotNull] string resultSelector, params object[] args)
+        {
+            Check.NotNull(outer, nameof(outer));
+            Check.NotNull(inner, nameof(inner));
+            Check.NotEmpty(outerKeySelector, nameof(outerKeySelector));
+            Check.NotEmpty(innerKeySelector, nameof(innerKeySelector));
+            Check.NotEmpty(resultSelector, nameof(resultSelector));
+
+            Type outerType = outer.ElementType;
+            Type innerType = inner.AsQueryable().ElementType;
+
+            bool createParameterCtor = outer.IsLinqToObjects();
+            LambdaExpression outerSelectorLambda = DynamicExpressionParser.ParseLambda(createParameterCtor, outerType, null, outerKeySelector, args);
+            LambdaExpression innerSelectorLambda = DynamicExpressionParser.ParseLambda(createParameterCtor, innerType, null, innerKeySelector, args);
+
+            CheckOuterAndInnerTypes(createParameterCtor, outerType, innerType, outerKeySelector, innerKeySelector, ref outerSelectorLambda, ref innerSelectorLambda, args);
+
+            ParameterExpression[] parameters =
+            {
+                Expression.Parameter(outerType, "outer"),
+                Expression.Parameter(typeof(IEnumerable<>).MakeGenericType(innerType), "inner")
+            };
+
+            LambdaExpression resultSelectorLambda = DynamicExpressionParser.ParseLambda(createParameterCtor, parameters, null, resultSelector, args);
+
+            return outer.Provider.CreateQuery(Expression.Call(
+                typeof(Queryable), nameof(Queryable.GroupJoin),
+                new[] { outer.ElementType, innerType, outerSelectorLambda.Body.Type, resultSelectorLambda.Body.Type },
+                outer.Expression,
+                Expression.Constant(inner),
+                Expression.Quote(outerSelectorLambda),
+                Expression.Quote(innerSelectorLambda),
+                Expression.Quote(resultSelectorLambda)));
+        }
+        #endregion
+
+        #region Join
         /// <summary>
         /// Correlates the elements of two sequences based on matching keys. The default equality comparer is used to compare keys.
         /// </summary>
@@ -450,20 +666,25 @@ namespace System.Linq.Dynamic.Core
             Check.NotEmpty(innerKeySelector, nameof(innerKeySelector));
             Check.NotEmpty(resultSelector, nameof(resultSelector));
 
-            bool createParameterCtor = outer.IsLinqToObjects();
-            LambdaExpression outerSelectorLambda = DynamicExpressionParser.ParseLambda(createParameterCtor, outer.ElementType, null, outerKeySelector, args);
-            LambdaExpression innerSelectorLambda = DynamicExpressionParser.ParseLambda(createParameterCtor, inner.AsQueryable().ElementType, null, innerKeySelector, args);
+            Type outerType = outer.ElementType;
+            Type innerType = inner.AsQueryable().ElementType;
 
-            ParameterExpression[] parameters = new[]
+            bool createParameterCtor = outer.IsLinqToObjects();
+            LambdaExpression outerSelectorLambda = DynamicExpressionParser.ParseLambda(createParameterCtor, outerType, null, outerKeySelector, args);
+            LambdaExpression innerSelectorLambda = DynamicExpressionParser.ParseLambda(createParameterCtor, innerType, null, innerKeySelector, args);
+
+            CheckOuterAndInnerTypes(createParameterCtor, outerType, innerType, outerKeySelector, innerKeySelector, ref outerSelectorLambda, ref innerSelectorLambda, args);
+
+            ParameterExpression[] parameters =
             {
-                Expression.Parameter(outer.ElementType, "outer"), Expression.Parameter(inner.AsQueryable().ElementType, "inner")
+                Expression.Parameter(outerType, "outer"), Expression.Parameter(innerType, "inner")
             };
 
             LambdaExpression resultSelectorLambda = DynamicExpressionParser.ParseLambda(createParameterCtor, parameters, null, resultSelector, args);
 
             var optimized = OptimizeExpression(Expression.Call(
                 typeof(Queryable), "Join",
-                new[] { outer.ElementType, inner.AsQueryable().ElementType, outerSelectorLambda.Body.Type, resultSelectorLambda.Body.Type },
+                new[] { outerType, innerType, outerSelectorLambda.Body.Type, resultSelectorLambda.Body.Type },
                 outer.Expression, // outer: The first sequence to join.
                 inner.AsQueryable().Expression, // inner: The sequence to join to the first sequence.
                 Expression.Quote(outerSelectorLambda), // outerKeySelector: A function to extract the join key from each element of the first sequence.
@@ -490,9 +711,9 @@ namespace System.Linq.Dynamic.Core
         {
             return (IQueryable<TElement>)Join((IQueryable)outer, (IEnumerable)inner, outerKeySelector, innerKeySelector, resultSelector, args);
         }
-#endregion Join
+        #endregion Join
 
-#region Last
+        #region Last
         private static readonly MethodInfo _last = GetMethod(nameof(Queryable.Last));
         /// <summary>
         /// Returns the last element of a sequence.
@@ -509,9 +730,49 @@ namespace System.Linq.Dynamic.Core
 
             return Execute(_last, source);
         }
-#endregion Last
 
-#region LastOrDefault
+        private static readonly MethodInfo _lastPredicate = GetMethod(nameof(Queryable.Last), 1);
+
+        /// <summary>
+        /// Returns the last element of a sequence that satisfies a specified condition.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return the last element of.</param>
+        /// <param name="predicate">A function to test each element for a condition.</param>
+        /// <param name="args">An object array that contains zero or more objects to insert into the predicate as parameters. Similar to the way String.Format formats strings.</param>
+        /// <returns>The first element in source that passes the test in predicate.</returns>
+#if NET35
+        public static object Last([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+#else
+        public static dynamic Last([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+#endif
+        {
+            Check.NotNull(source, nameof(source));
+            Check.NotEmpty(predicate, nameof(predicate));
+
+            bool createParameterCtor = source.IsLinqToObjects();
+            LambdaExpression lambda = DynamicExpressionParser.ParseLambda(createParameterCtor, source.ElementType, null, predicate, args);
+
+            return Execute(_lastPredicate, source, lambda);
+        }
+
+        /// <summary>
+        /// Returns the last element of a sequence that satisfies a specified condition.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return the last element of.</param>
+        /// <param name="lambda">A cached Lambda Expression.</param>
+        /// <returns>The first element in source that passes the test in predicate.</returns>
+#if NET35
+        public static object Last([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#else
+        public static dynamic Last([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#endif
+        {
+            Check.NotNull(source, nameof(source));
+            return Execute(_lastPredicate, source, lambda);
+        }
+        #endregion Last
+
+        #region LastOrDefault
         private static readonly MethodInfo _lastDefault = GetMethod(nameof(Queryable.LastOrDefault));
         /// <summary>
         /// Returns the last element of a sequence, or a default value if the sequence contains no elements.
@@ -528,9 +789,49 @@ namespace System.Linq.Dynamic.Core
 
             return Execute(_lastDefault, source);
         }
-#endregion LastOrDefault
 
-#region OrderBy
+        private static readonly MethodInfo _lastDefaultPredicate = GetMethod(nameof(Queryable.LastOrDefault), 1);
+
+        /// <summary>
+        /// Returns the last element of a sequence that satisfies a specified condition, or a default value if the sequence contains no elements.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return the last element of.</param>
+        /// <param name="predicate">A function to test each element for a condition.</param>
+        /// <param name="args">An object array that contains zero or more objects to insert into the predicate as parameters. Similar to the way String.Format formats strings.</param>
+        /// <returns>The first element in source that passes the test in predicate.</returns>
+#if NET35
+        public static object LastOrDefault([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+#else
+        public static dynamic LastOrDefault([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+#endif
+        {
+            Check.NotNull(source, nameof(source));
+            Check.NotEmpty(predicate, nameof(predicate));
+
+            bool createParameterCtor = source.IsLinqToObjects();
+            LambdaExpression lambda = DynamicExpressionParser.ParseLambda(createParameterCtor, source.ElementType, null, predicate, args);
+
+            return Execute(_lastDefaultPredicate, source, lambda);
+        }
+
+        /// <summary>
+        /// Returns the last element of a sequence that satisfies a specified condition, or a default value if the sequence contains no elements.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return the last element of.</param>
+        /// <param name="lambda">A cached Lambda Expression.</param>
+        /// <returns>The first element in source that passes the test in predicate.</returns>
+#if NET35
+        public static object LastOrDefault([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#else
+        public static dynamic LastOrDefault([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#endif
+        {
+            Check.NotNull(source, nameof(source));
+            return Execute(_lastDefaultPredicate, source, lambda);
+        }
+        #endregion LastOrDefault
+
+        #region OrderBy
         /// <summary>
         /// Sorts the elements of a sequence in ascending or descending order according to a key.
         /// </summary>
@@ -573,7 +874,7 @@ namespace System.Linq.Dynamic.Core
             Check.NotEmpty(ordering, nameof(ordering));
 
             ParameterExpression[] parameters = { Expression.Parameter(source.ElementType, "") };
-            ExpressionParser parser = new ExpressionParser(parameters, ordering, args);
+            ExpressionParser parser = new ExpressionParser(parameters, ordering, args, null);
             IList<DynamicOrdering> dynamicOrderings = parser.ParseOrdering();
 
             Expression queryExpr = source.Expression;
@@ -589,9 +890,9 @@ namespace System.Linq.Dynamic.Core
             var optimized = OptimizeExpression(queryExpr);
             return (IOrderedQueryable)source.Provider.CreateQuery(optimized);
         }
-#endregion OrderBy
+        #endregion OrderBy
 
-#region Page/PageResult
+        #region Page/PageResult
         /// <summary>
         /// Returns the elements as paged.
         /// </summary>
@@ -677,9 +978,9 @@ namespace System.Linq.Dynamic.Core
 
             return result;
         }
-#endregion Page/PageResult
+        #endregion Page/PageResult
 
-#region Reverse
+        #region Reverse
         /// <summary>
         /// Inverts the order of the elements in a sequence.
         /// </summary>
@@ -691,9 +992,9 @@ namespace System.Linq.Dynamic.Core
 
             return Queryable.Reverse((IQueryable<object>)source);
         }
-#endregion Reverse
+        #endregion Reverse
 
-#region Select
+        #region Select
         /// <summary>
         /// Projects each element of a sequence into a new form.
         /// </summary>
@@ -786,9 +1087,9 @@ namespace System.Linq.Dynamic.Core
 
             return source.Provider.CreateQuery(optimized);
         }
-#endregion Select
+        #endregion Select
 
-#region SelectMany
+        #region SelectMany
         /// <summary>
         /// Projects each element of a sequence to an <see cref="IQueryable"/> and combines the resulting sequences into one sequence.
         /// </summary>
@@ -845,9 +1146,13 @@ namespace System.Linq.Dynamic.Core
                 // SelectMany assumes that lambda.Body.Type is a generic type and throws an exception on
                 // lambda.Body.Type.GetGenericArguments()[0] when used over an array as GetGenericArguments() returns an empty array.
                 if (lambda.Body.Type.IsArray)
+                {
                     resultType = lambda.Body.Type.GetElementType();
+                }
                 else
+                {
                     resultType = lambda.Body.Type.GetGenericArguments()[0];
+                }
             }
 
             //we have to adjust to lambda to return an IEnumerable<T> instead of whatever the actual property is.
@@ -857,7 +1162,7 @@ namespace System.Linq.Dynamic.Core
             lambda = Expression.Lambda(delegateType, lambda.Body, lambda.Parameters);
 
             var optimized = OptimizeExpression(Expression.Call(
-                typeof(Queryable), "SelectMany",
+                typeof(Queryable), nameof(Queryable.SelectMany),
                 new[] { source.ElementType, resultType },
                 source.Expression, Expression.Quote(lambda))
             );
@@ -895,7 +1200,7 @@ namespace System.Linq.Dynamic.Core
             lambda = Expression.Lambda(delegateType, lambda.Body, lambda.Parameters);
 
             var optimized = OptimizeExpression(Expression.Call(
-                typeof(Queryable), "SelectMany",
+                typeof(Queryable), nameof(Queryable.SelectMany),
                 new[] { source.ElementType, typeof(TResult) },
                 source.Expression, Expression.Quote(lambda))
             );
@@ -984,16 +1289,16 @@ namespace System.Linq.Dynamic.Core
             Type resultLambdaResultType = resultSelectLambda.Body.Type;
 
             var optimized = OptimizeExpression(Expression.Call(
-                typeof(Queryable), "SelectMany",
+                typeof(Queryable), nameof(Queryable.SelectMany),
                 new[] { source.ElementType, sourceLambdaResultType, resultLambdaResultType },
                 source.Expression, Expression.Quote(sourceSelectLambda), Expression.Quote(resultSelectLambda))
             );
 
             return source.Provider.CreateQuery(optimized);
         }
-#endregion SelectMany
+        #endregion SelectMany
 
-#region Single/SingleOrDefault
+        #region Single/SingleOrDefault
         /// <summary>
         /// Returns the only element of a sequence, and throws an exception if there
         /// is not exactly one element in the sequence.
@@ -1008,8 +1313,50 @@ namespace System.Linq.Dynamic.Core
         {
             Check.NotNull(source, nameof(source));
 
-            var optimized = OptimizeExpression(Expression.Call(typeof(Queryable), "Single", new[] { source.ElementType }, source.Expression));
+            var optimized = OptimizeExpression(Expression.Call(typeof(Queryable), nameof(Queryable.Single), new[] { source.ElementType }, source.Expression));
             return source.Provider.Execute(optimized);
+        }
+
+        private static readonly MethodInfo _singlePredicate = GetMethod(nameof(Queryable.Single), 1);
+
+        /// <summary>
+        /// Returns the only element of a sequence that satisfies a specified condition, and throws an exception if there
+        /// is not exactly one element in the sequence.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return the last element of.</param>
+        /// <param name="predicate">A function to test each element for a condition.</param>
+        /// <param name="args">An object array that contains zero or more objects to insert into the predicate as parameters. Similar to the way String.Format formats strings.</param>
+        /// <returns>The first element in source that passes the test in predicate.</returns>
+#if NET35
+        public static object Single([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+#else
+        public static dynamic Single([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+#endif
+        {
+            Check.NotNull(source, nameof(source));
+            Check.NotEmpty(predicate, nameof(predicate));
+
+            bool createParameterCtor = source.IsLinqToObjects();
+            LambdaExpression lambda = DynamicExpressionParser.ParseLambda(createParameterCtor, source.ElementType, null, predicate, args);
+
+            return Execute(_singlePredicate, source, lambda);
+        }
+
+        /// <summary>
+        /// Returns the only element of a sequence that satisfies a specified condition, and throws an exception if there
+        /// is not exactly one element in the sequence.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return the last element of.</param>
+        /// <param name="lambda">A cached Lambda Expression.</param>
+        /// <returns>The first element in source that passes the test in predicate.</returns>
+#if NET35
+        public static object Single([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#else
+        public static dynamic Single([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#endif
+        {
+            Check.NotNull(source, nameof(source));
+            return Execute(_singlePredicate, source, lambda);
         }
 
         /// <summary>
@@ -1027,12 +1374,54 @@ namespace System.Linq.Dynamic.Core
         {
             Check.NotNull(source, nameof(source));
 
-            var optimized = OptimizeExpression(Expression.Call(typeof(Queryable), "SingleOrDefault", new[] { source.ElementType }, source.Expression));
+            var optimized = OptimizeExpression(Expression.Call(typeof(Queryable), nameof(Queryable.SingleOrDefault), new[] { source.ElementType }, source.Expression));
             return source.Provider.Execute(optimized);
         }
-#endregion Single/SingleOrDefault
 
-#region Skip
+        private static readonly MethodInfo _singleDefaultPredicate = GetMethod(nameof(Queryable.SingleOrDefault), 1);
+
+        /// <summary>
+        /// Returns the only element of a sequence that satisfies a specified condition or a default value if the sequence
+        /// is empty; and throws an exception if there is not exactly one element in the sequence.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return the last element of.</param>
+        /// <param name="predicate">A function to test each element for a condition.</param>
+        /// <param name="args">An object array that contains zero or more objects to insert into the predicate as parameters. Similar to the way String.Format formats strings.</param>
+        /// <returns>The first element in source that passes the test in predicate.</returns>
+#if NET35
+        public static object SingleOrDefault([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+#else
+        public static dynamic SingleOrDefault([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+#endif
+        {
+            Check.NotNull(source, nameof(source));
+            Check.NotEmpty(predicate, nameof(predicate));
+
+            bool createParameterCtor = source.IsLinqToObjects();
+            LambdaExpression lambda = DynamicExpressionParser.ParseLambda(createParameterCtor, source.ElementType, null, predicate, args);
+
+            return Execute(_singleDefaultPredicate, source, lambda);
+        }
+
+        /// <summary>
+        /// Returns the only element of a sequence that satisfies a specified condition or a default value if the sequence
+        /// is empty; and throws an exception if there is not exactly one element in the sequence.
+        /// </summary>
+        /// <param name="source">The <see cref="IQueryable"/> to return the last element of.</param>
+        /// <param name="lambda">A cached Lambda Expression.</param>
+        /// <returns>The first element in source that passes the test in predicate.</returns>
+#if NET35
+        public static object SingleOrDefault([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#else
+        public static dynamic SingleOrDefault([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+#endif
+        {
+            Check.NotNull(source, nameof(source));
+            return Execute(_singleDefaultPredicate, source, lambda);
+        }
+        #endregion Single/SingleOrDefault
+
+        #region Skip
         private static readonly MethodInfo _skip = GetMethod(nameof(Queryable.Skip), 1);
 
         /// <summary>
@@ -1052,10 +1441,10 @@ namespace System.Linq.Dynamic.Core
 
             return CreateQuery(_skip, source, Expression.Constant(count));
         }
-#endregion Skip
+        #endregion Skip
 
-#region SkipWhile
-        private static readonly MethodInfo _skipWhilePredicate = GetMethod(nameof(Queryable.SkipWhile), 1, _predicateParameterHas2);
+        #region SkipWhile
+        private static readonly MethodInfo _skipWhilePredicate = GetMethod(nameof(Queryable.SkipWhile), 1, PredicateParameterHas2);
 
         /// <summary>
         /// Bypasses elements in a sequence as long as a specified condition is true and then returns the remaining elements.
@@ -1081,9 +1470,9 @@ namespace System.Linq.Dynamic.Core
 
             return CreateQuery(_skipWhilePredicate, source, lambda);
         }
-#endregion SkipWhile
+        #endregion SkipWhile
 
-#region Sum
+        #region Sum
         /// <summary>
         /// Computes the sum of a sequence of numeric values.
         /// </summary>
@@ -1093,12 +1482,12 @@ namespace System.Linq.Dynamic.Core
         {
             Check.NotNull(source, nameof(source));
 
-            var optimized = OptimizeExpression(Expression.Call(typeof(Queryable), "Sum", null, source.Expression));
+            var optimized = OptimizeExpression(Expression.Call(typeof(Queryable), nameof(Queryable.Sum), null, source.Expression));
             return source.Provider.Execute(optimized);
         }
-#endregion Sum
+        #endregion Sum
 
-#region Take
+        #region Take
         private static readonly MethodInfo _take = GetMethod(nameof(Queryable.Take), 1);
         /// <summary>
         /// Returns a specified number of contiguous elements from the start of a sequence.
@@ -1113,10 +1502,10 @@ namespace System.Linq.Dynamic.Core
 
             return CreateQuery(_take, source, Expression.Constant(count));
         }
-#endregion Take
+        #endregion Take
 
-#region TakeWhile
-        private static readonly MethodInfo _takeWhilePredicate = GetMethod(nameof(Queryable.TakeWhile), 1, _predicateParameterHas2);
+        #region TakeWhile
+        private static readonly MethodInfo _takeWhilePredicate = GetMethod(nameof(Queryable.TakeWhile), 1, PredicateParameterHas2);
 
         /// <summary>
         /// Returns elements from a sequence as long as a specified condition is true.
@@ -1144,7 +1533,7 @@ namespace System.Linq.Dynamic.Core
         }
         #endregion TakeWhile
 
-#region ThenBy
+        #region ThenBy
         /// <summary>
         /// Performs a subsequent ordering of the elements in a sequence in ascending order according to a key.
         /// </summary>
@@ -1189,7 +1578,7 @@ namespace System.Linq.Dynamic.Core
             Check.NotEmpty(ordering, nameof(ordering));
 
             ParameterExpression[] parameters = { Expression.Parameter(source.ElementType, "") };
-            ExpressionParser parser = new ExpressionParser(parameters, ordering, args);
+            ExpressionParser parser = new ExpressionParser(parameters, ordering, args, null);
             IList<DynamicOrdering> dynamicOrderings = parser.ParseOrdering(forceThenBy: true);
 
             Expression queryExpr = source.Expression;
@@ -1205,14 +1594,15 @@ namespace System.Linq.Dynamic.Core
             var optimized = OptimizeExpression(queryExpr);
             return (IOrderedQueryable)source.Provider.CreateQuery(optimized);
         }
-#endregion OrderBy
+        #endregion OrderBy
 
-#region Where
+        #region Where
         /// <summary>
         /// Filters a sequence of values based on a predicate.
         /// </summary>
         /// <typeparam name="TSource">The type of the elements of source.</typeparam>
         /// <param name="source">A <see cref="IQueryable{TSource}"/> to filter.</param>
+        /// <param name="config">The <see cref="ParsingConfig"/>.</param>
         /// <param name="predicate">An expression string to test each element for a condition.</param>
         /// <param name="args">An object array that contains zero or more objects to insert into the predicate as parameters. Similar to the way String.Format formats strings.</param>
         /// <returns>A <see cref="IQueryable{TSource}"/> that contains elements from the input sequence that satisfy the condition specified by predicate.</returns>
@@ -1225,18 +1615,25 @@ namespace System.Linq.Dynamic.Core
         /// var result5 = queryable.Where("StringProperty = @0", "abc");
         /// </code>
         /// </example>
-        public static IQueryable<TSource> Where<TSource>([NotNull] this IQueryable<TSource> source, [NotNull] string predicate, params object[] args)
+        public static IQueryable<TSource> Where<TSource>([NotNull] this IQueryable<TSource> source, [CanBeNull] ParsingConfig config, [NotNull] string predicate, params object[] args)
         {
             Check.NotNull(source, nameof(source));
             Check.NotEmpty(predicate, nameof(predicate));
 
-            return (IQueryable<TSource>)Where((IQueryable)source, predicate, args);
+            return (IQueryable<TSource>)Where((IQueryable)source, config, predicate, args);
+        }
+
+        /// <inheritdoc cref="DynamicQueryableExtensions.Where{TSource}(IQueryable{TSource}, ParsingConfig, string, object[])"/>
+        public static IQueryable<TSource> Where<TSource>([NotNull] this IQueryable<TSource> source, [NotNull] string predicate, params object[] args)
+        {
+            return Where(source, null, predicate, args);
         }
 
         /// <summary>
         /// Filters a sequence of values based on a predicate.
         /// </summary>
         /// <param name="source">A <see cref="IQueryable"/> to filter.</param>
+        /// <param name="config">The <see cref="ParsingConfig"/>.</param>
         /// <param name="predicate">An expression string to test each element for a condition.</param>
         /// <param name="args">An object array that contains zero or more objects to insert into the predicate as parameters. Similar to the way String.Format formats strings.</param>
         /// <returns>A <see cref="IQueryable"/> that contains elements from the input sequence that satisfy the condition specified by predicate.</returns>
@@ -1249,22 +1646,75 @@ namespace System.Linq.Dynamic.Core
         /// var result5 = queryable.Where("StringProperty = @0", "abc");
         /// </code>
         /// </example>
-        public static IQueryable Where([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+        public static IQueryable Where([NotNull] this IQueryable source, [CanBeNull] ParsingConfig config, [NotNull] string predicate, params object[] args)
         {
             Check.NotNull(source, nameof(source));
             Check.NotEmpty(predicate, nameof(predicate));
 
             bool createParameterCtor = source.IsLinqToObjects();
-            LambdaExpression lambda = DynamicExpressionParser.ParseLambda(createParameterCtor, source.ElementType, typeof(bool), predicate, args);
+            LambdaExpression lambda = DynamicExpressionParser.ParseLambda(config, createParameterCtor, source.ElementType, null, predicate, args);
 
-            var optimized = OptimizeExpression(Expression.Call(typeof(Queryable), "Where", new[] { source.ElementType }, source.Expression, Expression.Quote(lambda)));
+            var optimized = OptimizeExpression(Expression.Call(typeof(Queryable), nameof(Queryable.Where), new[] { source.ElementType }, source.Expression, Expression.Quote(lambda)));
             return source.Provider.CreateQuery(optimized);
         }
-#endregion
 
-#region Private Helpers
+        /// <inheritdoc cref="DynamicQueryableExtensions.Where(IQueryable, ParsingConfig, string, object[])"/>
+        public static IQueryable Where([NotNull] this IQueryable source, [NotNull] string predicate, params object[] args)
+        {
+            return Where(source, null, predicate, args);
+        }
+
+        /// <summary>
+        /// Filters a sequence of values based on a predicate.
+        /// </summary>
+        /// <param name="source">A <see cref="IQueryable"/> to filter.</param>
+        /// <param name="lambda">A cached Lambda Expression.</param>
+        public static IQueryable Where([NotNull] this IQueryable source, [NotNull] LambdaExpression lambda)
+        {
+            Check.NotNull(source, nameof(source));
+            Check.NotNull(lambda, nameof(lambda));
+
+            var optimized = OptimizeExpression(Expression.Call(typeof(Queryable), nameof(Queryable.Where), new[] { source.ElementType }, source.Expression, Expression.Quote(lambda)));
+            return source.Provider.CreateQuery(optimized);
+        }
+        #endregion
+
+        #region Private Helpers
+        private static void CheckOuterAndInnerTypes(bool createParameterCtor, Type outerType, Type innerType, string outerKeySelector, string innerKeySelector, ref LambdaExpression outerSelectorLambda, ref LambdaExpression innerSelectorLambda, params object[] args)
+        {
+            Type outerSelectorReturnType = outerSelectorLambda.Body.Type;
+            Type innerSelectorReturnType = innerSelectorLambda.Body.Type;
+
+            // If types are not the same, try to convert to Nullable and generate new LambdaExpression
+            if (outerSelectorReturnType != innerSelectorReturnType)
+            {
+                //var outerSelectorReturnTypeInfo = outerSelectorReturnType.GetTypeInfo();
+                //var innerSelectorReturnTypeInfo = innerSelectorReturnType.GetTypeInfo();
+                //if (outerSelectorReturnTypeInfo.BaseType == typeof(DynamicClass) && innerSelectorReturnTypeInfo.BaseType == typeof(DynamicClass))
+                //{
+
+                //}
+
+                if (TypeHelper.IsNullableType(outerSelectorReturnType) && !TypeHelper.IsNullableType(innerSelectorReturnType))
+                {
+                    innerSelectorReturnType = ExpressionParser.ToNullableType(innerSelectorReturnType);
+                    innerSelectorLambda = DynamicExpressionParser.ParseLambda(createParameterCtor, innerType, innerSelectorReturnType, innerKeySelector, args);
+                }
+                else if (!TypeHelper.IsNullableType(outerSelectorReturnType) && TypeHelper.IsNullableType(innerSelectorReturnType))
+                {
+                    outerSelectorReturnType = ExpressionParser.ToNullableType(outerSelectorReturnType);
+                    outerSelectorLambda = DynamicExpressionParser.ParseLambda(createParameterCtor, outerType, outerSelectorReturnType, outerKeySelector, args);
+                }
+
+                // If types are still not the same, throw an Exception
+                if (outerSelectorReturnType != innerSelectorReturnType)
+                {
+                    throw new ParseException(string.Format(CultureInfo.CurrentCulture, Res.IncompatibleTypes, outerSelectorReturnType, innerSelectorReturnType), -1);
+                }
+            }
+        }
+
         // Code below is based on https://github.com/aspnet/EntityFramework/blob/9186d0b78a3176587eeb0f557c331f635760fe92/src/Microsoft.EntityFrameworkCore/EntityFrameworkQueryableExtensions.cs
-
         private static IQueryable CreateQuery(MethodInfo operatorMethodInfo, IQueryable source)
         {
             if (operatorMethodInfo.IsGenericMethod)
@@ -1285,7 +1735,7 @@ namespace System.Linq.Dynamic.Core
                     ? operatorMethodInfo.MakeGenericMethod(source.ElementType, typeof(object))
                     : operatorMethodInfo.MakeGenericMethod(source.ElementType);
 
-            return source.Provider.CreateQuery(Expression.Call(null, operatorMethodInfo, new[] { source.Expression, expression }));
+            return source.Provider.CreateQuery(Expression.Call(null, operatorMethodInfo, source.Expression, expression));
         }
 
         private static object Execute(MethodInfo operatorMethodInfo, IQueryable source)
@@ -1319,7 +1769,7 @@ namespace System.Linq.Dynamic.Core
                     ? operatorMethodInfo.MakeGenericMethod(source.ElementType, typeof(object))
                     : operatorMethodInfo.MakeGenericMethod(source.ElementType);
 
-            var optimized = OptimizeExpression(Expression.Call(null, operatorMethodInfo, new[] { source.Expression, expression }));
+            var optimized = OptimizeExpression(Expression.Call(null, operatorMethodInfo, source.Expression, expression));
             return source.Provider.Execute(optimized);
         }
 
@@ -1332,15 +1782,15 @@ namespace System.Linq.Dynamic.Core
                     ? operatorMethodInfo.MakeGenericMethod(source.ElementType, typeof(TResult))
                     : operatorMethodInfo.MakeGenericMethod(source.ElementType);
 
-            var optimized = OptimizeExpression(Expression.Call(null, operatorMethodInfo, new[] { source.Expression, expression }));
+            var optimized = OptimizeExpression(Expression.Call(null, operatorMethodInfo, source.Expression, expression));
             return source.Provider.Execute<TResult>(optimized);
         }
 
         private static MethodInfo GetMethod<TResult>(string name, int parameterCount = 0, Func<MethodInfo, bool> predicate = null) =>
-            GetMethod(name, parameterCount, mi => (mi.ReturnType == typeof(TResult)) && ((predicate == null) || predicate(mi)));
+            GetMethod(name, parameterCount, mi => mi.ReturnType == typeof(TResult) && (predicate == null || predicate(mi)));
 
         private static MethodInfo GetMethod(string name, int parameterCount = 0, Func<MethodInfo, bool> predicate = null) =>
-            typeof(Queryable).GetTypeInfo().GetDeclaredMethods(name).Single(mi => (mi.GetParameters().Length == parameterCount + 1) && ((predicate == null) || predicate(mi)));
-#endregion Private Helpers
+            typeof(Queryable).GetTypeInfo().GetDeclaredMethods(name).Single(mi => mi.GetParameters().Length == parameterCount + 1 && (predicate == null || predicate(mi)));
+        #endregion Private Helpers
     }
 }

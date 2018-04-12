@@ -54,9 +54,14 @@ namespace System.Linq.Dynamic.Core.Tokenizer
 
         public void NextToken()
         {
-            while (char.IsWhiteSpace(_ch)) NextChar();
-            TokenId t;
+            while (char.IsWhiteSpace(_ch))
+            {
+                NextChar();
+            }
+
+            TokenId tokenId = TokenId.Unknown;
             int tokenPos = _textPos;
+
             switch (_ch)
             {
                 case '!':
@@ -64,17 +69,17 @@ namespace System.Linq.Dynamic.Core.Tokenizer
                     if (_ch == '=')
                     {
                         NextChar();
-                        t = TokenId.ExclamationEqual;
+                        tokenId = TokenId.ExclamationEqual;
                     }
                     else
                     {
-                        t = TokenId.Exclamation;
+                        tokenId = TokenId.Exclamation;
                     }
                     break;
 
                 case '%':
                     NextChar();
-                    t = TokenId.Percent;
+                    tokenId = TokenId.Percent;
                     break;
 
                 case '&':
@@ -82,56 +87,67 @@ namespace System.Linq.Dynamic.Core.Tokenizer
                     if (_ch == '&')
                     {
                         NextChar();
-                        t = TokenId.DoubleAmphersand;
+                        tokenId = TokenId.DoubleAmphersand;
                     }
                     else
                     {
-                        t = TokenId.Amphersand;
+                        tokenId = TokenId.Amphersand;
                     }
                     break;
 
                 case '(':
                     NextChar();
-                    t = TokenId.OpenParen;
+                    tokenId = TokenId.OpenParen;
                     break;
 
                 case ')':
                     NextChar();
-                    t = TokenId.CloseParen;
+                    tokenId = TokenId.CloseParen;
+                    break;
+
+                case '{':
+                    NextChar();
+                    tokenId = TokenId.OpenCurlyParen;
+                    break;
+
+                case '}':
+                    NextChar();
+                    tokenId = TokenId.CloseCurlyParen;
                     break;
 
                 case '*':
                     NextChar();
-                    t = TokenId.Asterisk;
+                    tokenId = TokenId.Asterisk;
                     break;
+
                 case '+':
                     NextChar();
-                    t = TokenId.Plus;
+                    tokenId = TokenId.Plus;
                     break;
 
                 case ',':
                     NextChar();
-                    t = TokenId.Comma;
+                    tokenId = TokenId.Comma;
                     break;
 
                 case '-':
                     NextChar();
-                    t = TokenId.Minus;
+                    tokenId = TokenId.Minus;
                     break;
 
                 case '.':
                     NextChar();
-                    t = TokenId.Dot;
+                    tokenId = TokenId.Dot;
                     break;
 
                 case '/':
                     NextChar();
-                    t = TokenId.Slash;
+                    tokenId = TokenId.Slash;
                     break;
 
                 case ':':
                     NextChar();
-                    t = TokenId.Colon;
+                    tokenId = TokenId.Colon;
                     break;
 
                 case '<':
@@ -139,21 +155,21 @@ namespace System.Linq.Dynamic.Core.Tokenizer
                     if (_ch == '=')
                     {
                         NextChar();
-                        t = TokenId.LessThanEqual;
+                        tokenId = TokenId.LessThanEqual;
                     }
                     else if (_ch == '>')
                     {
                         NextChar();
-                        t = TokenId.LessGreater;
+                        tokenId = TokenId.LessGreater;
                     }
                     else if (_ch == '<')
                     {
                         NextChar();
-                        t = TokenId.DoubleLessThan;
+                        tokenId = TokenId.DoubleLessThan;
                     }
                     else
                     {
-                        t = TokenId.LessThan;
+                        tokenId = TokenId.LessThan;
                     }
                     break;
 
@@ -162,11 +178,16 @@ namespace System.Linq.Dynamic.Core.Tokenizer
                     if (_ch == '=')
                     {
                         NextChar();
-                        t = TokenId.DoubleEqual;
+                        tokenId = TokenId.DoubleEqual;
+                    }
+                    else if (_ch == '>')
+                    {
+                        NextChar();
+                        tokenId = TokenId.Lambda;
                     }
                     else
                     {
-                        t = TokenId.Equal;
+                        tokenId = TokenId.Equal;
                     }
                     break;
 
@@ -175,16 +196,16 @@ namespace System.Linq.Dynamic.Core.Tokenizer
                     if (_ch == '=')
                     {
                         NextChar();
-                        t = TokenId.GreaterThanEqual;
+                        tokenId = TokenId.GreaterThanEqual;
                     }
                     else if (_ch == '>')
                     {
                         NextChar();
-                        t = TokenId.DoubleGreaterThan;
+                        tokenId = TokenId.DoubleGreaterThan;
                     }
                     else
                     {
-                        t = TokenId.GreaterThan;
+                        tokenId = TokenId.GreaterThan;
                     }
                     break;
 
@@ -193,22 +214,27 @@ namespace System.Linq.Dynamic.Core.Tokenizer
                     if (_ch == '?')
                     {
                         NextChar();
-                        t = TokenId.NullCoalescing;
+                        tokenId = TokenId.NullCoalescing;
+                    }
+                    else if (_ch == '.')
+                    {
+                        NextChar();
+                        tokenId = TokenId.NullPropagation;
                     }
                     else
                     {
-                        t = TokenId.Question;
+                        tokenId = TokenId.Question;
                     }
                     break;
 
                 case '[':
                     NextChar();
-                    t = TokenId.OpenBracket;
+                    tokenId = TokenId.OpenBracket;
                     break;
 
                 case ']':
                     NextChar();
-                    t = TokenId.CloseBracket;
+                    tokenId = TokenId.CloseBracket;
                     break;
 
                 case '|':
@@ -216,11 +242,11 @@ namespace System.Linq.Dynamic.Core.Tokenizer
                     if (_ch == '|')
                     {
                         NextChar();
-                        t = TokenId.DoubleBar;
+                        tokenId = TokenId.DoubleBar;
                     }
                     else
                     {
-                        t = TokenId.Bar;
+                        tokenId = TokenId.Bar;
                     }
                     break;
 
@@ -250,7 +276,7 @@ namespace System.Linq.Dynamic.Core.Tokenizer
                         NextChar();
                     } while (_ch == quote);
 
-                    t = TokenId.StringLiteral;
+                    tokenId = TokenId.StringLiteral;
                     break;
 
                 default:
@@ -260,17 +286,30 @@ namespace System.Linq.Dynamic.Core.Tokenizer
                         {
                             NextChar();
                         } while (char.IsLetterOrDigit(_ch) || _ch == '_');
-                        t = TokenId.Identifier;
+                        tokenId = TokenId.Identifier;
                         break;
                     }
 
                     if (char.IsDigit(_ch))
                     {
-                        t = TokenId.IntegerLiteral;
+                        tokenId = TokenId.IntegerLiteral;
                         do
                         {
                             NextChar();
                         } while (char.IsDigit(_ch));
+
+                        bool hexInteger = false;
+                        if (_ch == 'X' || _ch == 'x')
+                        {
+                            NextChar();
+                            ValidateHexChar();
+                            do
+                            {
+                                NextChar();
+                            } while (IsHexChar(_ch));
+
+                            hexInteger = true;
+                        }
 
                         if (_ch == 'U' || _ch == 'L')
                         {
@@ -284,9 +323,14 @@ namespace System.Linq.Dynamic.Core.Tokenizer
                             break;
                         }
 
+                        if (hexInteger)
+                        {
+                            break;
+                        }
+
                         if (_ch == NumberDecimalSeparator)
                         {
-                            t = TokenId.RealLiteral;
+                            tokenId = TokenId.RealLiteral;
                             NextChar();
                             ValidateDigit();
                             do
@@ -297,7 +341,7 @@ namespace System.Linq.Dynamic.Core.Tokenizer
 
                         if (_ch == 'E' || _ch == 'e')
                         {
-                            t = TokenId.RealLiteral;
+                            tokenId = TokenId.RealLiteral;
                             NextChar();
                             if (_ch == '+' || _ch == '-') NextChar();
                             ValidateDigit();
@@ -309,40 +353,63 @@ namespace System.Linq.Dynamic.Core.Tokenizer
 
                         if (_ch == 'F' || _ch == 'f') NextChar();
                         if (_ch == 'D' || _ch == 'd') NextChar();
+                        if (_ch == 'M' || _ch == 'm') NextChar();
                         break;
                     }
 
                     if (_textPos == _textLen)
                     {
-                        t = TokenId.End;
+                        tokenId = TokenId.End;
                         break;
                     }
+
                     throw ParseError(_textPos, Res.InvalidCharacter, _ch);
             }
 
             CurrentToken.Pos = tokenPos;
             CurrentToken.Text = _text.Substring(tokenPos, _textPos - tokenPos);
-            CurrentToken.Id = GetAliasedTokenId(t, CurrentToken.Text);
+            CurrentToken.OriginalId = tokenId;
+            CurrentToken.Id = GetAliasedTokenId(tokenId, CurrentToken.Text);
         }
 
         public void ValidateToken(TokenId t, string errorMessage)
         {
-            if (CurrentToken.Id != t) throw ParseError(errorMessage);
+            if (CurrentToken.Id != t)
+            {
+                throw ParseError(errorMessage);
+            }
         }
 
         public void ValidateToken(TokenId t)
         {
-            if (CurrentToken.Id != t) throw ParseError(Res.SyntaxError);
+            if (CurrentToken.Id != t)
+            {
+                throw ParseError(Res.SyntaxError);
+            }
         }
 
         private void ValidateExpression()
         {
-            if (char.IsLetterOrDigit(_ch)) throw ParseError(_textPos, Res.ExpressionExpected);
+            if (char.IsLetterOrDigit(_ch))
+            {
+                throw ParseError(_textPos, Res.ExpressionExpected);
+            }
         }
 
         private void ValidateDigit()
         {
-            if (!char.IsDigit(_ch)) throw ParseError(_textPos, Res.DigitExpected);
+            if (!char.IsDigit(_ch))
+            {
+                throw ParseError(_textPos, Res.DigitExpected);
+            }
+        }
+
+        private void ValidateHexChar()
+        {
+            if (!IsHexChar(_ch))
+            {
+                throw ParseError(_textPos, Res.HexCharExpected);
+            }
         }
 
         private Exception ParseError(string format, params object[] args)
@@ -359,6 +426,22 @@ namespace System.Linq.Dynamic.Core.Tokenizer
         {
             TokenId id;
             return t == TokenId.Identifier && _predefinedAliases.TryGetValue(alias, out id) ? id : t;
+        }
+
+        private static bool IsHexChar(char c)
+        {
+            if (char.IsDigit(c))
+            {
+                return true;
+            }
+
+            if (c <= '\x007f')
+            {
+                c |= (char)0x20;
+                return c >= 'a' && c <= 'f';
+            }
+
+            return false;
         }
     }
 }

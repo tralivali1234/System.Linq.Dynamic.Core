@@ -65,11 +65,11 @@ namespace System.Linq.Dynamic.Core
             Check.NotNull(source, nameof(source));
             Check.NotNull(type, nameof(type));
 
-            object result = ToDynamicArrayGenericMethod.MakeGenericMethod(type).Invoke(source, new object[] { source });
+            IEnumerable result = (IEnumerable)ToDynamicArrayGenericMethod.MakeGenericMethod(type).Invoke(source, new object[] { source });
 #if NET35
-            return (object[])result;
+            return CastToArray<object>(result);
 #else
-            return (dynamic[]) result;
+            return CastToArray<dynamic>(result);
 #endif
         }
 
@@ -122,12 +122,12 @@ namespace System.Linq.Dynamic.Core
             return CastToList<T>(source);
         }
 
-        private static T[] CastToArray<T>(IEnumerable source)
+        internal static T[] CastToArray<T>(IEnumerable source)
         {
             return source.Cast<T>().ToArray();
         }
 
-        private static List<T> CastToList<T>(IEnumerable source)
+        internal static List<T> CastToList<T>(IEnumerable source)
         {
             return source.Cast<T>().ToList();
         }

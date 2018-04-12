@@ -1,6 +1,7 @@
-﻿using System.Collections.Generic;
+﻿using NFluent;
 using System.Linq.Dynamic.Core.Exceptions;
 using System.Linq.Dynamic.Core.Tests.Helpers.Models;
+using System.Reflection;
 using Xunit;
 
 namespace System.Linq.Dynamic.Core.Tests
@@ -23,25 +24,20 @@ namespace System.Linq.Dynamic.Core.Tests
             Assert.Equal(testList.GroupBy(x => x.Profile.Age).Count(), byAgeReturnAll.Count());
         }
 
+        // https://github.com/StefH/System.Linq.Dynamic.Core/issues/75
         [Fact]
-        public void GroupByMany_Dynamic_LambdaExpressions()
+        public void GroupBy_Dynamic_Issue75()
         {
-            var lst = new List<Tuple<int, int, int>>
-            {
-                new Tuple<int, int, int>(1, 1, 1),
-                new Tuple<int, int, int>(1, 1, 2),
-                new Tuple<int, int, int>(1, 1, 3),
-                new Tuple<int, int, int>(2, 2, 4),
-                new Tuple<int, int, int>(2, 2, 5),
-                new Tuple<int, int, int>(2, 2, 6),
-                new Tuple<int, int, int>(2, 3, 7)
-            };
+            var testList = User.GenerateSampleModels(100);
 
-            var sel = lst.AsQueryable().GroupByMany(x => x.Item1, x => x.Item2);
+            var resultDynamic = testList.AsQueryable().GroupBy("Profile.Age").Select("new (it.key as PropertyKey)");
+            var result = testList.GroupBy(e => e.Profile.Age).Select(e => new { PropertyKey = e.Key }).AsQueryable();
 
-            Assert.Equal(sel.Count(), 2);
-            Assert.Equal(sel.First().Subgroups.Count(), 1);
-            Assert.Equal(sel.Skip(1).First().Subgroups.Count(), 2);
+            // I think this should be true, but it isn't. dynamicResult add System.Object Item [System.String] property.
+            PropertyInfo[] properties = result.ElementType.GetTypeInfo().GetProperties();
+            PropertyInfo[] propertiesDynamic = resultDynamic.ElementType.GetTypeInfo().GetProperties();
+
+            Check.That(propertiesDynamic.Length).IsStrictlyGreaterThan(properties.Length);
         }
 
         [Fact]
